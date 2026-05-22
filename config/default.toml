@@ -1,0 +1,55 @@
+[rpc]
+base_rpc_url = "https://mainnet.base.org"
+# For testnet use: "https://sepolia.base.org"
+
+[pair]
+# USDC on Base mainnet
+token_in  = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+# WETH on Base mainnet
+token_out = "0x4200000000000000000000000000000000000006"
+# Uniswap V3 fee tier: 500 = 0.05%, 3000 = 0.3%, 10000 = 1%
+fee_tier  = 500
+
+[sizing]
+min_usd = 50.0
+max_usd = 800.0
+# log-normal distribution parameters (mu, sigma for underlying normal)
+# these produce amounts that look human — irregular, not round
+lognormal_mu    = 4.5   # exp(4.5) ≈ 90 USD midpoint
+lognormal_sigma = 0.8
+
+[timing]
+min_delay_secs = 45
+max_delay_secs = 420
+# exponential distribution lambda — average ~3min between trades
+exp_lambda = 0.006
+
+[bias]
+buy_weight  = 55
+sell_weight = 45
+
+[wallets]
+# Bot loads all WALLET_KEY_0, WALLET_KEY_1, ... from environment
+keys_env_prefix = "WALLET_KEY_"
+# Set to true if using Coinbase Smart Wallet (single entry point, auto-rotates sub-addresses)
+use_smart_wallet = false
+# smart_wallet_address = "0x..."   # uncomment if use_smart_wallet = true
+
+[safety]
+# Stop bot if total USD traded today exceeds this
+max_daily_volume_usd = 50000.0
+# Abort if gas price exceeds this (in gwei)
+max_gas_gwei = 10.0
+# Slippage range in basis points (50 = 0.5%, 150 = 1.5%)
+min_slippage_bps = 50
+max_slippage_bps = 150
+# Tx deadline in seconds from submission
+tx_deadline_secs = 120
+
+[logging]
+# Path to append-only trade CSV log
+log_file = "trades.csv"
+# Optional Telegram alert on N consecutive failures (set to 0 to disable)
+alert_on_consecutive_failures = 3
+# telegram_bot_token = ""
+# telegram_chat_id   = ""

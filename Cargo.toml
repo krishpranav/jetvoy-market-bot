@@ -1,0 +1,52 @@
+[package]
+name = "jetvoy-market-bot"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "market-bot"
+path = "src/main.rs"
+
+[dependencies]
+# Ethereum / Base chain
+alloy = { version = "2.0", features = [
+    "full",
+    "signer-local",
+    "provider-http",
+    "rpc-types-eth",
+    "contract",
+] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Randomness
+rand = "0.8"
+rand_distr = "0.4"
+
+# Config
+config = { version = "0.14", features = ["toml"] }
+toml = "0.8"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Environment / CLI
+dotenv = "0.15"
+clap = { version = "4", features = ["derive"] }
+
+# Utilities
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+csv = "1"
+reqwest = { version = "0.12", features = ["json"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
