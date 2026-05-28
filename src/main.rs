@@ -70,16 +70,26 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        // Pick wallet first so we can check its balances
-        let signer = pool.pick(&mut rng);
-        let wallet_addr: Address = signer.address();
-
-        // ── Gate 1: Check ETH for gas ─────────────────────────────────────────
-        if let Err(e) = dex::check_gas_funds(wallet_addr, &provider).await {
-            tracing::warn!("{}", e);
-            sleep(Duration::from_secs(60)).await;
-            continue;
-        }
+        // Pick a wallet that actually has ETH — try all before giving up
+        let (signer, wallet_addr) = {
+            let mut found = None;
+            for _ in 0..pool.len() {
+                let s = pool.pick(&mut rng);
+                let addr: Address = s.address();
+                if dex::check_gas_funds(addr, &provider).await.is_ok() {
+                    found = Some((s, addr));
+                    break;
+                }
+            }
+            match found {
+                Some(pair) => pair,
+                None => {
+                    tracing::warn!("No wallet has enough ETH for gas — waiting 60s");
+                    sleep(Duration::from_secs(60)).await;
+                    continue;
+                }
+            }
+        };
 
         // ── Gate 2: Determine trade side & compute amount from actual balance ─
         // Generate side first, then compute safe amount from real balance
