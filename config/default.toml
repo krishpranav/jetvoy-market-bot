@@ -15,12 +15,11 @@ token_out = "0x4200000000000000000000000000000000000006"
 fee_tier  = 500
 
 [sizing]
-min_usd = 50.0
-max_usd = 800.0
+min_usd = 1.0
+max_usd = 8.0
 # log-normal distribution parameters (mu, sigma for underlying normal)
-# these produce amounts that look human — irregular, not round
-lognormal_mu    = 4.5   # exp(4.5) ≈ 90 USD midpoint
-lognormal_sigma = 0.8
+lognormal_mu    = 1.5   # exp(1.5) ≈ 4.5 USD midpoint for testing
+lognormal_sigma = 0.5
 
 [timing]
 min_delay_secs = 45

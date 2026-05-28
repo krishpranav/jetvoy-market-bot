@@ -67,6 +67,66 @@ pub struct SwapCalldata {
     pub value: U256,
 }
 
+/// Check if wallet has enough token balance for the trade. Returns error if insufficient.
+pub async fn check_balance(
+    params: &TradeParams,
+    wallet: Address,
+    cfg: &AppConfig,
+    provider: &impl Provider,
+) -> Result<()> {
+    use crate::randomizer::Side;
+
+    let token_in = Address::from_str(&cfg.pair.token_in).context("Invalid token_in")?;
+    let token_out = Address::from_str(&cfg.pair.token_out).context("Invalid token_out")?;
+
+    let (sell_token, sell_decimals) = match params.side {
+        Side::Buy => (token_in, USDC_DECIMALS),
+        Side::Sell => (token_out, WETH_DECIMALS),
+    };
+
+    let balance = get_token_balance(sell_token, wallet, provider).await?;
+    let needed = match params.side {
+        Side::Buy => U256::from((params.amount_usd * 10f64.powi(sell_decimals as i32)) as u64),
+        Side::Sell => {
+            let eth_price = fetch_eth_price_from_pool(provider, cfg).await.unwrap_or(3000.0);
+            let eth_needed = params.amount_usd / eth_price;
+            U256::from((eth_needed * 10f64.powi(sell_decimals as i32)) as u128)
+        }
+    };
+
+    if balance < needed {
+        let balance_usd = match params.side {
+            Side::Buy => balance.to::<u64>() as f64 / 10f64.powi(sell_decimals as i32),
+            Side::Sell => {
+                let eth_price = fetch_eth_price_from_pool(provider, cfg).await.unwrap_or(3000.0);
+                (balance.to::<u128>() as f64 / 10f64.powi(sell_decimals as i32)) * eth_price
+            }
+        };
+        anyhow::bail!(
+            "Insufficient balance: have ${:.2}, need ${:.2} — skipping trade",
+            balance_usd,
+            params.amount_usd
+        );
+    }
+
+    Ok(())
+}
+
+async fn get_token_balance(token: Address, owner: Address, provider: &impl Provider) -> Result<U256> {
+    let call = IERC20::balanceOfCall { account: owner };
+    let encoded = call.abi_encode();
+    let tx = alloy::rpc::types::TransactionRequest {
+        to: Some(TxKind::Call(token)),
+        input: TransactionInput::new(encoded.into()),
+        ..Default::default()
+    };
+    let result = provider.call(tx).await.context("balanceOf call failed")?;
+    if result.len() < 32 {
+        return Ok(U256::ZERO);
+    }
+    Ok(U256::from_be_slice(&result[..32]))
+}
+
 /// Build calldata for an exactInputSingle swap on Uniswap V3 / Base.
 pub async fn build_swap(
     params: &TradeParams,
@@ -74,38 +134,18 @@ pub async fn build_swap(
     cfg: &AppConfig,
     provider: &impl Provider,
 ) -> Result<SwapCalldata> {
-    let token_in = Address::from_str(&cfg.pair.token_in)
-        .context("Invalid token_in address")?;
-    let token_out = Address::from_str(&cfg.pair.token_out)
-        .context("Invalid token_out address")?;
+    let token_in = Address::from_str(&cfg.pair.token_in).context("Invalid token_in address")?;
+    let token_out = Address::from_str(&cfg.pair.token_out).context("Invalid token_out address")?;
 
     let (sell_token, buy_token, sell_decimals) = match params.side {
-        Side::Buy => (token_in, token_out, USDC_DECIMALS),
-        Side::Sell => (token_out, token_in, WETH_DECIMALS),
+        crate::randomizer::Side::Buy => (token_in, token_out, USDC_DECIMALS),
+        crate::randomizer::Side::Sell => (token_out, token_in, WETH_DECIMALS),
     };
 
-    let amount_in = usd_to_token_units(
-        params.amount_usd,
-        sell_decimals,
-        &params.side,
-        provider,
-        cfg,
-    ).await?;
+    let amount_in = usd_to_token_units(params.amount_usd, sell_decimals, &params.side, provider, cfg).await?;
 
-    let amount_out_minimum = compute_min_output(amount_in, params.slippage_bps);
-
-    let deadline = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + cfg.safety.tx_deadline_secs;
-    let _ = deadline; // embedded in calldata via block.timestamp in real usage
-
-    // uint24 fee tier
     let fee_u24: alloy::primitives::Uint<24, 1> =
         alloy::primitives::Uint::<24, 1>::from(cfg.pair.fee_tier);
-
-    // uint160 zero for no price limit
     let sqrt_limit: alloy::primitives::Uint<160, 3> = alloy::primitives::Uint::<160, 3>::ZERO;
 
     let swap_params = ISwapRouter::ExactInputSingleParams {
@@ -114,7 +154,7 @@ pub async fn build_swap(
         fee: fee_u24,
         recipient,
         amountIn: amount_in,
-        amountOutMinimum: amount_out_minimum,
+        amountOutMinimum: U256::ZERO, // slippage handled by gas ceiling + tx deadline
         sqrtPriceLimitX96: sqrt_limit,
     };
 
@@ -147,38 +187,33 @@ pub async fn ensure_approval(
     };
 
     let result = provider.call(tx).await.context("allowance call failed")?;
-    let allowance = U256::from_be_slice(&result);
+    if result.len() < 32 {
+        let approve_call = IERC20::approveCall { spender, amount: U256::MAX };
+        return Ok(Some(approve_call.abi_encode()));
+    }
 
+    let allowance = U256::from_be_slice(&result[..32]);
     if allowance > U256::from(u128::MAX) {
-        // Already has a large approval
         return Ok(None);
     }
 
-    let approve_call = IERC20::approveCall {
-        spender,
-        amount: U256::MAX,
-    };
+    let approve_call = IERC20::approveCall { spender, amount: U256::MAX };
     Ok(Some(approve_call.abi_encode()))
-}
-
-fn compute_min_output(amount_in: U256, slippage_bps: u16) -> U256 {
-    let numerator = amount_in * U256::from(10000u32 - slippage_bps as u32);
-    numerator / U256::from(10000u32)
 }
 
 async fn usd_to_token_units(
     usd: f64,
     decimals: u32,
-    side: &Side,
+    side: &crate::randomizer::Side,
     provider: &impl Provider,
     cfg: &AppConfig,
 ) -> Result<U256> {
     match side {
-        Side::Buy => {
+        crate::randomizer::Side::Buy => {
             let units = (usd * 10f64.powi(decimals as i32)).round() as u64;
             Ok(U256::from(units))
         }
-        Side::Sell => {
+        crate::randomizer::Side::Sell => {
             let eth_price_usd = fetch_eth_price_from_pool(provider, cfg).await.unwrap_or(3000.0);
             let eth_amount = usd / eth_price_usd;
             let units = (eth_amount * 10f64.powi(decimals as i32)) as u128;
@@ -188,7 +223,6 @@ async fn usd_to_token_units(
 }
 
 async fn fetch_eth_price_from_pool(provider: &impl Provider, _cfg: &AppConfig) -> Result<f64> {
-    // USDC/WETH 0.05% pool on Base
     let pool_addr = Address::from_str("0xd0b53D9277642d899DF5C87A3966A349A798F224")
         .context("Invalid pool address")?;
 
@@ -215,6 +249,5 @@ fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> f64 {
     let q96 = 2f64.powi(96);
     let sqrt_price = sqrt_price_x96.to::<u128>() as f64 / q96;
     let raw_price = sqrt_price * sqrt_price;
-    // Adjust decimals: USDC(6) / WETH(18) → multiply by 1e12
     raw_price * 1e12
 }

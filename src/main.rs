@@ -119,6 +119,12 @@ async fn main() -> Result<()> {
             continue;
         }
 
+        // Check wallet has enough balance before attempting trade
+        if let Err(e) = dex::check_balance(&params, wallet_addr, &cfg, &provider).await {
+            tracing::warn!("{}", e);
+            continue;
+        }
+
         // Build swap calldata (same for both modes)
         let calldata = match dex::build_swap(&params, wallet_addr, &cfg, &provider).await {
             Ok(c) => c,
