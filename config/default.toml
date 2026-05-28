@@ -7,19 +7,21 @@ base_rpc_url = "https://mainnet.base.org"
 # bundler_url = ""
 
 [pair]
-# USDC on Base mainnet
-token_in  = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-# WETH on Base mainnet
-token_out = "0x4200000000000000000000000000000000000006"
-# Uniswap V3 fee tier: 500 = 0.05%, 3000 = 0.3%, 10000 = 1%
-fee_tier  = 500
+# WETH on Base (used as token_in for BUY, token_out for SELL)
+token_in  = "0x4200000000000000000000000000000000000006"
+# Jetvoy (VOY) on Base
+token_out = "0xe58b3ab1fb80304de37a507a2449fea64bf0b507"
+# Uniswap V2 pair (WETH/JETVOY)
+pair_address = "0x8361e0FD714DA989874CCbF34175D64673B1B3D4"
+# Not used for V2 but kept for reference
+fee_tier  = 3000
 
 [sizing]
-min_usd = 1.0
-max_usd = 8.0
-# log-normal distribution parameters (mu, sigma for underlying normal)
-lognormal_mu    = 1.5   # exp(1.5) ≈ 4.5 USD midpoint for testing
-lognormal_sigma = 0.5
+min_usd = 0.05
+max_usd = 2.0
+# Small amounts — fees should stay in pennies on Base
+lognormal_mu    = 0.5
+lognormal_sigma = 0.4
 
 [timing]
 min_delay_secs = 45

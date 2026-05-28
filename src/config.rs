@@ -23,6 +23,7 @@ pub struct RpcConfig {
 pub struct PairConfig {
     pub token_in: String,
     pub token_out: String,
+    pub pair_address: String,
     pub fee_tier: u32,
 }
 

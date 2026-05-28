@@ -112,31 +112,32 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        // Ensure token approval
-        let token_in = Address::from_str(&cfg.pair.token_in).unwrap();
-        let router = Address::from_str(dex::SWAP_ROUTER_BASE).unwrap();
-
-        if let Ok(Some(approve_data)) = dex::ensure_approval(
-            token_in, wallet_addr, router, alloy::primitives::U256::MAX, &provider
-        ).await {
-            tracing::info!(wallet = %wallet_addr, "Approving SwapRouter");
-            let approve_calldata = dex::SwapCalldata {
-                to: token_in,
-                data: approve_data,
-                value: alloy::primitives::U256::ZERO,
-            };
-            if let Err(e) = executor::execute_with_retry(
-                approve_calldata, signer, &cfg.rpc.base_rpc_url,
-                cfg.safety.max_gas_gwei, &mut rng,
+        // For SELL trades, ensure Jetvoy token is approved for the router
+        if matches!(params.side, randomizer::Side::Sell) {
+            let jetvoy = Address::from_str(&cfg.pair.token_out).unwrap();
+            let router = Address::from_str(dex::SWAP_ROUTER_BASE).unwrap();
+            if let Ok(Some(approve_data)) = dex::ensure_approval(
+                jetvoy, wallet_addr, router, &provider
             ).await {
-                tracing::error!("Approval failed: {}", e);
-                monitor.log_failure(&params, wallet_addr, &e.to_string());
-                continue;
+                tracing::info!(wallet = %wallet_addr, "Approving router to spend Jetvoy");
+                let approve_calldata = dex::SwapCalldata {
+                    to: jetvoy,
+                    data: approve_data,
+                    value: alloy::primitives::U256::ZERO,
+                };
+                if let Err(e) = executor::execute_with_retry(
+                    approve_calldata, signer, &cfg.rpc.base_rpc_url,
+                    cfg.safety.max_gas_gwei, &mut rng,
+                ).await {
+                    tracing::error!("Approval failed: {}", e);
+                    monitor.log_failure(&params, wallet_addr, &e.to_string());
+                    continue;
+                }
             }
         }
 
         // Build calldata
-        let calldata = match dex::build_swap(&params, wallet_addr, &cfg, &provider).await {
+        let calldata = match dex::build_swap(&params.side, params.amount_usd, wallet_addr, &cfg, &provider).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Failed to build calldata: {}", e);
