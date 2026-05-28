@@ -16,6 +16,7 @@ pub struct AppConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct RpcConfig {
     pub base_rpc_url: String,
+    pub bundler_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -49,6 +50,7 @@ pub struct BiasConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct WalletsConfig {
     pub keys_env_prefix: String,
+    // Smart wallet mode — routes trades through Coinbase Smart Wallet via ERC-4337
     pub use_smart_wallet: bool,
     pub smart_wallet_address: Option<String>,
 }

@@ -1,0 +1,22 @@
+[Unit]
+Description=JetVoy Market Making Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=REPO_DIR
+EnvironmentFile=REPO_DIR/.env
+ExecStart=REPO_DIR/target/release/market-bot
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jetvoy-market-bot
+
+# Safety: kill cleanly on stop
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

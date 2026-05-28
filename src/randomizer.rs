@@ -80,7 +80,7 @@ mod tests {
 
     fn test_config() -> AppConfig {
         AppConfig {
-            rpc: crate::config::RpcConfig { base_rpc_url: "https://mainnet.base.org".into() },
+            rpc: crate::config::RpcConfig { base_rpc_url: "https://mainnet.base.org".into(), bundler_url: None },
             pair: crate::config::PairConfig {
                 token_in: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into(),
                 token_out: "0x4200000000000000000000000000000000000006".into(),

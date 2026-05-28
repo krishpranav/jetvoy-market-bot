@@ -65,6 +65,31 @@ impl Monitor {
         self.append_csv(&row);
     }
 
+    pub fn log_success_smart(&mut self, params: &TradeParams, wallet: Address, op_hash: &str) {
+        self.total_volume_usd += params.amount_usd;
+        self.consecutive_failures = 0;
+
+        let row = format!(
+            "{},{},{:.2},{},{},0,ok",
+            Utc::now().to_rfc3339(),
+            params.side,
+            params.amount_usd,
+            wallet,
+            op_hash,
+        );
+
+        tracing::info!(
+            side = %params.side,
+            amount_usd = params.amount_usd,
+            wallet = %wallet,
+            op_hash,
+            total_volume_usd = self.total_volume_usd,
+            "Smart wallet trade executed"
+        );
+
+        self.append_csv(&row);
+    }
+
     pub fn log_failure(&mut self, params: &TradeParams, wallet: Address, reason: &str) {
         self.consecutive_failures += 1;
 
