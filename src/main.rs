@@ -18,7 +18,6 @@ use chrono;
 #[derive(Parser, Debug)]
 #[command(name = "market-bot", about = "Organic market-making bot for Base chain")]
 struct Args {
-    /// Run without broadcasting transactions
     #[arg(long)]
     dry_run: bool,
 }
@@ -37,15 +36,10 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let cfg = config::load().expect("Failed to load config");
 
-    tracing::info!(
-        dry_run = args.dry_run,
-        smart_wallet = cfg.wallets.use_smart_wallet,
-        "Starting market bot"
-    );
+    tracing::info!(dry_run = args.dry_run, "Starting market bot");
 
     let pool = wallet::WalletPool::load_from_env(&cfg.wallets.keys_env_prefix)?;
 
-    // Read-only provider for price checks
     let provider = ProviderBuilder::new()
         .connect_http(cfg.rpc.base_rpc_url.parse()?);
 
@@ -57,168 +51,117 @@ async fn main() -> Result<()> {
     )?;
 
     let mut rng = StdRng::from_entropy();
-
-    // Validate smart wallet config upfront
-    if cfg.wallets.use_smart_wallet {
-        let addr = cfg.wallets.smart_wallet_address.as_deref()
-            .expect("smart_wallet_address must be set in config when use_smart_wallet = true");
-        let bundler = cfg.rpc.bundler_url.as_deref()
-            .expect("bundler_url must be set in [rpc] when use_smart_wallet = true");
-        tracing::info!(smart_wallet = addr, bundler = bundler, "Smart wallet mode active");
-    }
+    let mut current_day = chrono::Utc::now().date_naive();
 
     tracing::info!("Bot running — press Ctrl+C to stop");
 
-    // Track current UTC date to reset daily volume at midnight
-    let mut current_day = chrono::Utc::now().date_naive();
-
     loop {
-        // Reset daily volume counter at midnight UTC
+        // Reset daily volume at midnight UTC
         let today = chrono::Utc::now().date_naive();
         if today != current_day {
-            tracing::info!(
-                previous_volume = monitor.total_volume_usd,
-                "New day — resetting daily volume counter"
-            );
+            tracing::info!(previous_volume = monitor.total_volume_usd, "New day — resetting volume");
             monitor.total_volume_usd = 0.0;
             current_day = today;
         }
 
         if monitor.total_volume_usd >= cfg.safety.max_daily_volume_usd {
-            tracing::warn!(
-                "Daily volume cap ${:.0} reached. Pausing until midnight UTC.",
-                cfg.safety.max_daily_volume_usd
-            );
-            // Sleep 1 hour and recheck — systemd will NOT restart, bot stays alive
+            tracing::warn!("Daily cap reached. Pausing 1hr.");
             sleep(Duration::from_secs(3600)).await;
             continue;
         }
 
-        let params = randomizer::next_trade(&cfg, &mut rng);
+        // Pick wallet first so we can check its balances
+        let signer = pool.pick(&mut rng);
+        let wallet_addr: Address = signer.address();
+
+        // ── Gate 1: Check ETH for gas ─────────────────────────────────────────
+        if let Err(e) = dex::check_gas_funds(wallet_addr, &provider).await {
+            tracing::warn!("{}", e);
+            sleep(Duration::from_secs(60)).await;
+            continue;
+        }
+
+        // ── Gate 2: Determine trade side & compute amount from actual balance ─
+        // Generate side first, then compute safe amount from real balance
+        let mut params = randomizer::next_trade(&cfg, &mut rng);
+
+        match dex::safe_trade_amount_usd(&params.side, wallet_addr, &cfg, &provider).await {
+            Ok(safe_amount) => {
+                params.amount_usd = safe_amount;
+            }
+            Err(e) => {
+                tracing::warn!("{}", e);
+                // Wait before retrying — no funds yet
+                sleep(Duration::from_secs(params.delay_secs)).await;
+                continue;
+            }
+        }
 
         tracing::info!(
             delay_secs = params.delay_secs,
             side = %params.side,
             amount_usd = params.amount_usd,
-            slippage_bps = params.slippage_bps,
+            wallet = %wallet_addr,
             "Next trade scheduled"
         );
 
         sleep(Duration::from_secs(params.delay_secs)).await;
 
-        let signer = pool.pick(&mut rng);
-        let wallet_addr: Address = signer.address();
-
         if args.dry_run {
-            tracing::info!(
-                wallet = %wallet_addr,
-                side = %params.side,
-                amount_usd = params.amount_usd,
-                "[DRY RUN] Would execute trade"
-            );
+            tracing::info!(wallet = %wallet_addr, side = %params.side, amount_usd = params.amount_usd, "[DRY RUN]");
             continue;
         }
 
-        // Check wallet has enough balance before attempting trade
-        if let Err(e) = dex::check_balance(&params, wallet_addr, &cfg, &provider).await {
-            tracing::warn!("{}", e);
-            continue;
+        // Ensure token approval
+        let token_in = Address::from_str(&cfg.pair.token_in).unwrap();
+        let router = Address::from_str(dex::SWAP_ROUTER_BASE).unwrap();
+
+        if let Ok(Some(approve_data)) = dex::ensure_approval(
+            token_in, wallet_addr, router, alloy::primitives::U256::MAX, &provider
+        ).await {
+            tracing::info!(wallet = %wallet_addr, "Approving SwapRouter");
+            let approve_calldata = dex::SwapCalldata {
+                to: token_in,
+                data: approve_data,
+                value: alloy::primitives::U256::ZERO,
+            };
+            if let Err(e) = executor::execute_with_retry(
+                approve_calldata, signer, &cfg.rpc.base_rpc_url,
+                cfg.safety.max_gas_gwei, &mut rng,
+            ).await {
+                tracing::error!("Approval failed: {}", e);
+                monitor.log_failure(&params, wallet_addr, &e.to_string());
+                continue;
+            }
         }
 
-        // Build swap calldata (same for both modes)
+        // Build calldata
         let calldata = match dex::build_swap(&params, wallet_addr, &cfg, &provider).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("Failed to build swap calldata: {}", e);
+                tracing::error!("Failed to build calldata: {}", e);
                 monitor.log_failure(&params, wallet_addr, &e.to_string());
                 continue;
             }
         };
 
-        if cfg.wallets.use_smart_wallet {
-            // ── Smart wallet mode: ERC-4337 UserOperation via Coinbase Smart Wallet ──
-            let smart_wallet_addr = Address::from_str(
-                cfg.wallets.smart_wallet_address.as_deref().unwrap()
-            ).expect("Invalid smart_wallet_address");
-            let bundler_url = cfg.rpc.bundler_url.as_deref().unwrap();
+        // ── Gate 3: Simulate for FREE before broadcasting ─────────────────────
+        if let Err(e) = dex::simulate_swap(&calldata, wallet_addr, &provider).await {
+            tracing::warn!("Simulation says tx would fail — skipping (no gas burned). Reason: {}", e);
+            continue;
+        }
 
-            // Ensure token approval (calldata targets the smart wallet as spender)
-            let token_in = Address::from_str(&cfg.pair.token_in).unwrap();
-            let router = Address::from_str(dex::SWAP_ROUTER_BASE).unwrap();
-            if let Ok(Some(approve_data)) = dex::ensure_approval(
-                token_in, smart_wallet_addr, router, alloy::primitives::U256::MAX, &provider
-            ).await {
-                tracing::info!(wallet = %smart_wallet_addr, "Approving SwapRouter via smart wallet");
-                let approve_calldata = dex::SwapCalldata {
-                    to: token_in,
-                    data: approve_data,
-                    value: alloy::primitives::U256::ZERO,
-                };
-                if let Err(e) = smart_wallet::execute_via_smart_wallet(
-                    approve_calldata,
-                    smart_wallet_addr,
-                    signer,
-                    bundler_url,
-                    &cfg.rpc.base_rpc_url,
-                    cfg.safety.max_gas_gwei,
-                ).await {
-                    tracing::error!("Smart wallet approval failed: {}", e);
-                    monitor.log_failure(&params, smart_wallet_addr, &e.to_string());
-                    continue;
-                }
+        // All gates passed — execute for real
+        match executor::execute_with_retry(
+            calldata, signer, &cfg.rpc.base_rpc_url,
+            cfg.safety.max_gas_gwei, &mut rng,
+        ).await {
+            Ok(result) => {
+                monitor.log_success(&params, wallet_addr, result.tx_hash, result.gas_used);
             }
-
-            match smart_wallet::execute_via_smart_wallet(
-                calldata,
-                smart_wallet_addr,
-                signer,
-                bundler_url,
-                &cfg.rpc.base_rpc_url,
-                cfg.safety.max_gas_gwei,
-            ).await {
-                Ok(op_hash) => {
-                    tracing::info!(op_hash, "Smart wallet trade confirmed");
-                    monitor.log_success_smart(&params, smart_wallet_addr, &op_hash);
-                }
-                Err(e) => {
-                    monitor.log_failure(&params, smart_wallet_addr, &e.to_string());
-                }
-            }
-        } else {
-            // ── Standard EOA mode ──────────────────────────────────────────────────
-            let token_in = Address::from_str(&cfg.pair.token_in).unwrap();
-            let router = Address::from_str(dex::SWAP_ROUTER_BASE).unwrap();
-            if let Ok(Some(approve_data)) = dex::ensure_approval(
-                token_in, wallet_addr, router, alloy::primitives::U256::MAX, &provider
-            ).await {
-                let approve_calldata = dex::SwapCalldata {
-                    to: token_in,
-                    data: approve_data,
-                    value: alloy::primitives::U256::ZERO,
-                };
-                if let Err(e) = executor::execute_with_retry(
-                    approve_calldata, signer, &cfg.rpc.base_rpc_url,
-                    cfg.safety.max_gas_gwei, &mut rng,
-                ).await {
-                    monitor.log_failure(&params, wallet_addr, &e.to_string());
-                    continue;
-                }
-            }
-
-            match executor::execute_with_retry(
-                calldata, signer, &cfg.rpc.base_rpc_url,
-                cfg.safety.max_gas_gwei, &mut rng,
-            ).await {
-                Ok(result) => {
-                    monitor.log_success(&params, wallet_addr, result.tx_hash, result.gas_used);
-                }
-                Err(e) => {
-                    monitor.log_failure(&params, wallet_addr, &e.to_string());
-                }
+            Err(e) => {
+                monitor.log_failure(&params, wallet_addr, &e.to_string());
             }
         }
     }
-
-    tracing::info!("Bot shut down. Session volume: ${:.2}", monitor.total_volume_usd);
-    Ok(())
 }
