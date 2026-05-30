@@ -83,8 +83,9 @@ mod tests {
             rpc: crate::config::RpcConfig { base_rpc_url: "https://mainnet.base.org".into(), bundler_url: None },
             pair: crate::config::PairConfig {
                 token_in: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into(),
-                token_out: "0x4200000000000000000000000000000000000006".into(),
-                fee_tier: 500,
+                token_out: "0xe58b3ab1fb80304de37a507a2449fea64bf0b507".into(),
+                pair_address: "0x8361e0FD714DA989874CCbF34175D64673B1B3D4".into(),
+                fee_tier: 3000,
             },
             sizing: crate::config::SizingConfig {
                 min_usd: 50.0,

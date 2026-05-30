@@ -50,18 +50,40 @@ pub async fn execute(
         .await
         .context("Failed to fetch nonce")?;
 
-    // Estimate gas limit via TransactionRequest builder
+    // Estimate gas limit. estimate_gas IS a full on-chain simulation of THIS
+    // exact tx — if it errors, the tx is guaranteed to revert, so we abort and
+    // spend ZERO gas instead of broadcasting a doomed transaction.
     let estimate_req = TransactionRequest::default()
         .with_to(calldata.to)
         .with_from(from)
         .with_input(calldata.data.clone())
         .with_value(calldata.value);
 
-    let gas_limit = provider
-        .estimate_gas(estimate_req)
+    let estimated = match provider.estimate_gas(estimate_req).await {
+        Ok(g) => g,
+        Err(e) => {
+            anyhow::bail!(
+                "Gas estimation failed — tx would revert. Skipping, no gas spent. ({})",
+                e
+            );
+        }
+    };
+    let gas_limit = (estimated as f64 * 1.2) as u64; // 20% safety buffer
+
+    // Pre-broadcast balance guard: must cover (gas_limit * gas_price) + value.
+    let eth_balance = provider
+        .get_balance(from)
         .await
-        .unwrap_or(300_000u64);
-    let gas_limit = (gas_limit as f64 * 1.2) as u64;
+        .context("Failed to fetch ETH balance")?;
+    let max_gas_cost = alloy::primitives::U256::from(gas_limit as u128 * adjusted_gas);
+    let required = max_gas_cost + calldata.value;
+    if eth_balance < required {
+        anyhow::bail!(
+            "Insufficient ETH for gas + value: have {:.6}, need {:.6} — skipping, no gas spent",
+            eth_balance.to::<u128>() as f64 / 1e18,
+            required.to::<u128>() as f64 / 1e18
+        );
+    }
 
     let mut tx = TxEip1559 {
         chain_id,
